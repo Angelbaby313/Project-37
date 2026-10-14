@@ -1,0 +1,465 @@
+{
+  "roles": {
+    "management": 1559650967346094253,
+    "verified": 1141440167320760370,
+    "whitelist": 1141153143879643247,
+    "female": 1141153144051601510,
+    "wl_team": 1559650968310644769,
+    "female_team": 1548543138597970021,
+    "support_team": 1141153144022249629,
+    "moderation_team": 1141153144051601514,
+    "donation_team": 1141153143862857795,
+    "ems_team": 1559650969296310434,
+    "pd_team": 1559650970521043106,
+    "realestate_team": 1559650971683004449,
+    "ems": 1559650973083902023,
+    "pd": 1559650991262011405,
+    "realestate": 1559650993774399518,
+    "donator": 1141444952002408458,
+    "creator": 1559650995649126551,
+    "partner": 1559650997280972924
+  },
+  "role_names": {
+    "management": "City Management",
+    "verified": "Verified",
+    "whitelist": "Key to the city",
+    "female": "Project Baddies",
+    "wl_team": "WL Team",
+    "female_team": "Female Verifier",
+    "support_team": "Support",
+    "moderation_team": "Moderation Team",
+    "donation_team": "Donation Manager",
+    "ems_team": "EMS Command",
+    "pd_team": "PD Command",
+    "realestate_team": "Real Estate Management",
+    "ems": "EMS",
+    "pd": "PD",
+    "realestate": "Real Estate",
+    "donator": "Donator",
+    "creator": "🎥 Streamer",
+    "partner": "Partner"
+  },
+  "channels": {
+    "welcome": 1559651000514510990,
+    "rules": 1559651002691616820,
+    "verify": 1559651004704628738,
+    "whitelist": 1559651007779315872,
+    "tickets": 1559651087097528473,
+    "applications": 1559651054298075178,
+    "transcripts": 1559651118118739978,
+    "restarts": 1559651012774731856,
+    "private_category": 1559651126234718278,
+    "guide": 1559651009217826816,
+    "announcements": 1559651011424157818,
+    "updates": 1559651016843202633,
+    "peek": 1559651020525670401,
+    "events": 1559651023478460477,
+    "partners": 1559651025156186212,
+    "streamer_lounge": 1559673325758976121,
+    "stream_links": 1559673327654801591
+  },
+  "requests": {
+    "whitelist": {
+      "label": "Request Whitelist",
+      "emoji": "🔑",
+      "team": "wl_team",
+      "grant": "whitelist",
+      "questions": [
+        "Character name / age / backstory",
+        "Your age / timezone / RP experience",
+        "What are RDM, VDM, and metagaming?",
+        "Family, business, and street RP goals",
+        "Rules agreement / interview availability"
+      ]
+    },
+    "donation": {
+      "label": "Donations",
+      "emoji": "💎",
+      "team": "donation_team",
+      "grant": null,
+      "questions": [
+        "What donation or perk is this about?",
+        "Question / issue / transaction reference"
+      ]
+    },
+    "support": {
+      "label": "Support",
+      "emoji": "🛠️",
+      "team": "support_team",
+      "grant": null,
+      "questions": [
+        "Character name / platform",
+        "Describe the issue / when it started",
+        "Steps tried / evidence links"
+      ]
+    },
+    "report": {
+      "label": "Player Report",
+      "emoji": "🚩",
+      "team": "moderation_team",
+      "grant": null,
+      "questions": [
+        "Your character / reported player details",
+        "Date / time / timezone / location",
+        "What happened / rule involved",
+        "Evidence links / witnesses"
+      ]
+    },
+    "female": {
+      "label": "Female Verification",
+      "emoji": "💋",
+      "team": "female_team",
+      "grant": "female",
+      "questions": [
+        "Character name",
+        "Availability for private verification"
+      ]
+    },
+    "ems": {
+      "label": "EMS Application",
+      "emoji": "🚑",
+      "team": "ems_team",
+      "grant": "ems",
+      "questions": [
+        "Character name / your age / timezone",
+        "RP experience / EMS experience",
+        "Why EMS? / weekly availability",
+        "Patient unresponsive: your RP response?",
+        "Scene unsafe: response / rules agreement"
+      ]
+    },
+    "pd": {
+      "label": "PD Application",
+      "emoji": "🚓",
+      "team": "pd_team",
+      "grant": "pd",
+      "questions": [
+        "Character name / your age / timezone",
+        "RP experience / PD experience",
+        "Why PD? / weekly availability",
+        "Traffic stop: approach / escalation?",
+        "Friend breaks law: response / rules?"
+      ]
+    },
+    "realestate": {
+      "label": "Real Estate Application",
+      "emoji": "🏡",
+      "team": "realestate_team",
+      "grant": "realestate",
+      "questions": [
+        "Character name / your age / timezone",
+        "Sales or real estate RP experience",
+        "Why real estate? / weekly availability",
+        "How would you handle a property viewing?",
+        "Dispute or scam concern: your response?"
+      ]
+    }
+  },
+  "layout": [
+    [
+      "🏡 ━ WELCOME HOME",
+      "arrival",
+      [
+        [
+          "welcome",
+          "👋・welcome"
+        ],
+        [
+          "rules",
+          "📜・city-rules"
+        ],
+        [
+          "verify",
+          "✅・verify"
+        ],
+        [
+          "whitelist",
+          "🔑・request-whitelist"
+        ],
+        [
+          "guide",
+          "📖・city-guide"
+        ]
+      ]
+    ],
+    [
+      "📢 ━ CITY BULLETIN",
+      "city",
+      [
+        [
+          "announcements",
+          "📣・announcements"
+        ],
+        [
+          "restarts",
+          "🔄・server-restarts"
+        ],
+        [
+          "updates",
+          "🛠️・city-updates"
+        ],
+        [
+          "peek",
+          "👀・sneak-peeks"
+        ],
+        [
+          "events",
+          "🎉・city-events"
+        ],
+        [
+          "partners",
+          "🤝・partners"
+        ]
+      ]
+    ],
+    [
+      "💬 ━ THE NEIGHBORHOOD",
+      "city",
+      [
+        [
+          null,
+          "💬・community-chat"
+        ],
+        [
+          null,
+          "📸・behind-the-character"
+        ],
+        [
+          null,
+          "🍽️・whats-cooking"
+        ],
+        [
+          null,
+          "😂・memes-and-moments"
+        ],
+        [
+          null,
+          "🎬・city-clips"
+        ],
+        [
+          null,
+          "💡・suggestions"
+        ]
+      ]
+    ],
+    [
+      "🌆 ━ LIFE IN PROJECT 37",
+      "city",
+      [
+        [
+          null,
+          "🪪・character-intros"
+        ],
+        [
+          null,
+          "📚・character-stories"
+        ],
+        [
+          null,
+          "🏡・family-connections"
+        ],
+        [
+          null,
+          "💌・missed-connections"
+        ],
+        [
+          null,
+          "🗞️・word-around-town"
+        ],
+        [
+          null,
+          "📱・city-socials"
+        ]
+      ]
+    ],
+    [
+      "💼 ━ CITY OPPORTUNITIES",
+      "city",
+      [
+        [
+          "applications",
+          "📋・career-applications"
+        ],
+        [
+          null,
+          "💼・business-directory"
+        ],
+        [
+          null,
+          "📋・job-board"
+        ],
+        [
+          null,
+          "🏪・business-requests"
+        ],
+        [
+          null,
+          "🏘️・housing-market"
+        ]
+      ]
+    ],
+    [
+      "🖤 ━ THE STREETS",
+      "city",
+      [
+        [
+          null,
+          "📜・street-rules"
+        ],
+        [
+          null,
+          "👥・crew-registration"
+        ],
+        [
+          null,
+          "🏴・approved-crews"
+        ]
+      ]
+    ],
+    [
+      "💋 ━ PROJECT BADDIES",
+      "female",
+      [
+        [
+          null,
+          "📢・baddies-announcements"
+        ],
+        [
+          null,
+          "💬・baddies-chat"
+        ],
+        [
+          null,
+          "👗・looks-and-links"
+        ],
+        [
+          null,
+          "💅・female-skin-guide"
+        ],
+        [
+          null,
+          "📸・baddies-gallery"
+        ],
+        [
+          null,
+          "voice:🥂・baddies-lounge"
+        ]
+      ]
+    ],
+    [
+      "🎫 ━ CITY ASSISTANCE",
+      "arrival",
+      [
+        [
+          "tickets",
+          "🎫・open-a-ticket"
+        ],
+        [
+          null,
+          "❓・support-and-faq"
+        ],
+        [
+          null,
+          "🐛・bug-reports"
+        ],
+        [
+          null,
+          "voice:⏳・waiting-for-support"
+        ],
+        [
+          null,
+          "voice:🎧・support-room"
+        ]
+      ]
+    ],
+    [
+      "💎 ━ SUPPORT THE CITY",
+      "city",
+      [
+        [
+          null,
+          "💎・donation-info"
+        ],
+        [
+          null,
+          "🚘・donation-vehicles"
+        ],
+        [
+          null,
+          "🎁・supporter-perks"
+        ]
+      ]
+    ],
+    [
+      "🔊 ━ THE HANGOUT",
+      "city",
+      [
+        [
+          null,
+          "voice:🛋️・the-living-room"
+        ],
+        [
+          null,
+          "voice:🌃・the-front-porch"
+        ],
+        [
+          null,
+          "voice:🎮・game-night"
+        ],
+        [
+          null,
+          "voice:🎵・music-lounge"
+        ],
+        [
+          null,
+          "voice:💤・afk"
+        ]
+      ]
+    ],
+    [
+      "🔒 ━ CITY MANAGEMENT",
+      "staff",
+      [
+        [
+          "transcripts",
+          "🗂️・ticket-transcripts"
+        ],
+        [
+          null,
+          "💬・staff-chat"
+        ],
+        [
+          null,
+          "📣・staff-announcements"
+        ],
+        [
+          null,
+          "🛡️・moderation-logs"
+        ],
+        [
+          null,
+          "voice:🔒・staff-lounge"
+        ]
+      ]
+    ],
+    [
+      "🎟️ ━ PRIVATE REQUESTS",
+      "private",
+      []
+    ],
+    [
+      "🎥 ━ PROJECT STREAMERS",
+      "streamers",
+      [
+        [
+          "streamer_lounge",
+          "🎥・streamer-lounge"
+        ],
+        [
+          "stream_links",
+          "📺・stream-links"
+        ]
+      ]
+    ]
+  ]
+}
