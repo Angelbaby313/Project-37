@@ -217,6 +217,7 @@ class ProjectBot(commands.Bot):
         self.add_view(TicketControls())
         self.add_view(EMSPanel())
         self.add_view(EMSClose())
+        self.add_view(EMSDutyView())
         if EMS_GUILD and EMS_GUILD == GUILD:
             raise RuntimeError('EMS_GUILD_ID must differ from GUILD_ID')
         for guild_id, ems in [(GUILD, False), (EMS_GUILD, True)]:
@@ -236,7 +237,15 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-    if member.guild.id!=GUILD or member.bot: return
+    if member.bot: return
+    if EMS_GUILD and member.guild.id == EMS_GUILD:
+        patient = member.guild.get_role(ems_settings().get('rank_roles',{}).get('patient',0))
+        if patient:
+            try: await member.add_roles(patient,reason='EMS patient access on joining')
+            except discord.HTTPException: logging.exception('Could not assign Patient role; check hierarchy and Manage Roles')
+        else: logging.warning('Patient role missing; run /setup_ems_roles in EMS Discord')
+        return
+    if member.guild.id!=GUILD: return
     channel=member.guild.get_channel(int(CFG['channels']['welcome']))
     if channel:
         await channel.send(content=member.mention,embed=embed('🏡 Welcome home to Project 37',f'Hey {member.mention}! Build your story, find your people, create a family, fall in love, or make your name in the city.\n\n📜 Read <#{CFG["channels"]["rules"]}>\n✅ Verify in <#{CFG["channels"]["verify"]}>\n🔑 Then request WL in <#{CFG["channels"]["whitelist"]}>\n\n🎫 Need help? Visit <#{CFG["channels"]["tickets"]}>.\n**Your next chapter starts at 37.**'),allowed_mentions=discord.AllowedMentions(users=[member]))
@@ -614,7 +623,7 @@ EMS_DB.execute('CREATE TABLE IF NOT EXISTS settings (guild INTEGER PRIMARY KEY, 
 EMS_DB.execute('CREATE TABLE IF NOT EXISTS shifts (id INTEGER PRIMARY KEY, guild INTEGER, member INTEGER, started INTEGER, ended INTEGER)')
 EMS_DB.execute('CREATE TABLE IF NOT EXISTS tickets (channel INTEGER PRIMARY KEY, guild INTEGER, owner INTEGER, kind TEXT, closed INTEGER DEFAULT 0)')
 EMS_DB.commit()
-EMS_COMMANDS = {'setup_ems', 'ems_hours', 'ems_patient_record'}
+EMS_COMMANDS = {'setup_ems', 'setup_ems_roles', 'ems_hours', 'ems_patient_record'}
 
 def ems_settings():
     row = EMS_DB.execute('SELECT data FROM settings WHERE guild=?', (EMS_GUILD,)).fetchone()
@@ -647,6 +656,9 @@ class EMSModal(discord.ui.Modal):
             self.add_item(discord.ui.TextInput(label=q, style=discord.TextStyle.paragraph, max_length=800))
     async def on_submit(self, i):
         if not await ems_guard(i): return
+        patient=ems_settings().get('rank_roles',{}).get('patient')
+        if self.kind=='appointment' and not i.user.guild_permissions.administrator and not any(r.id==patient for r in i.user.roles):
+            return await deny(i,'The Patient role is required to book an appointment.')
         await i.response.defer(ephemeral=True)
         async with LOCKS.setdefault(('ems-ticket', i.user.id, self.kind), asyncio.Lock()):
             cfg = ems_settings()
@@ -707,10 +719,86 @@ class EMSPanel(discord.ui.View):
         await deny(i,f'✅ Clocked out. Shift length: {(now-row[1])/3600:.2f} hours.')
     @discord.ui.button(label='Book appointment',style=discord.ButtonStyle.primary,custom_id='p37ems:appointment')
     async def appointment(self,i,button):
-        if await ems_guard(i): await i.response.send_modal(EMSModal('appointment'))
+        if not await ems_guard(i): return
+        patient=ems_settings().get('rank_roles',{}).get('patient')
+        if not i.user.guild_permissions.administrator and not any(r.id==patient for r in i.user.roles):
+            return await deny(i,'The Patient role is required to book an appointment.')
+        await i.response.send_modal(EMSModal('appointment'))
     @discord.ui.button(label='Apply for EMS',style=discord.ButtonStyle.primary,custom_id='p37ems:application')
     async def application(self,i,button):
         if await ems_guard(i): await i.response.send_modal(EMSModal('application'))
+
+class EMSDutyView(EMSPanel):
+    def __init__(self):
+        super().__init__()
+        for item in list(self.children):
+            if item.custom_id not in ('p37ems:in','p37ems:out','p37ems:hours'): self.remove_item(item)
+    @discord.ui.button(label='View my hours',style=discord.ButtonStyle.primary,custom_id='p37ems:hours')
+    async def hours(self,i,button):
+        await ems_hours.callback(i)
+
+class EMSAppointmentView(EMSPanel):
+    def __init__(self):
+        super().__init__()
+        for item in list(self.children):
+            if item.custom_id!='p37ems:appointment': self.remove_item(item)
+
+class EMSApplicationView(EMSPanel):
+    def __init__(self):
+        super().__init__()
+        for item in list(self.children):
+            if item.custom_id!='p37ems:application': self.remove_item(item)
+
+EMS_RANKS = [
+    ('staff_role', '🚑 EMS Staff', 0xE74C3C),
+    ('command_role', '👑 EMS Command', 0x9B59B6),
+    ('chief', '🏥 EMS Chief', 0xC0392B),
+    ('deputy_chief', '⭐ Deputy Chief', 0xD35400),
+    ('captain', '🎖️ EMS Captain', 0xF1C40F),
+    ('paramedic', '💉 Paramedic', 0x3498DB),
+    ('emt', '🩺 EMT', 0x1ABC9C),
+    ('trainee', '📚 EMS Trainee', 0x95A5A6),
+    ('nurse', '💊 Nurse', 0xE84393),
+    ('physical_therapist', '🦽 Physical Therapist', 0x16A085),
+    ('therapist', '🧠 Therapist', 0x8E44AD),
+    ('government', '🏛️ Government', 0x34495E),
+    ('patient', '💚 Patient', 0x2ECC71),
+]
+
+@bot.tree.command(name='setup_ems_roles', description='Create basic EMS ranks and reuse your existing staff and command roles')
+@app_commands.default_permissions(administrator=True)
+async def setup_ems_roles(i:discord.Interaction):
+    if not await ems_guard(i): return
+    if not i.user.guild_permissions.administrator:
+        return await deny(i,'Administrator permission is required.')
+    if not i.guild.me.guild_permissions.manage_roles:
+        return await deny(i,'Give the bot Manage Roles and move its role above the EMS roles first.')
+    await i.response.defer(ephemeral=True,thinking=True)
+    async with LOCKS.setdefault('ems-setup',asyncio.Lock()):
+        cfg=ems_settings()
+        rank_ids=cfg.setdefault('rank_roles',{})
+        resolved={}
+        # Resolve all existing roles first; stop rather than guess duplicate names.
+        for key,name,color in EMS_RANKS:
+            saved=cfg.get(key) if key in ('staff_role','command_role') else rank_ids.get(key)
+            r=i.guild.get_role(saved or 0)
+            if r is None:
+                candidates=[r for r in i.guild.roles if not r.managed and r.name in (name,name.split(' ',1)[1])]
+                if len(candidates)>1:
+                    return await deny(i,f'Multiple roles match {name}. Rename the extra roles before retrying.')
+                r=candidates[0] if candidates else None
+            if r and (r.is_default() or r.managed):
+                return await deny(i,f'{name} must be a normal member role.')
+            resolved[key]=r
+        for key,name,color in EMS_RANKS:
+            r=resolved[key]
+            if r is None:
+                r=await i.guild.create_role(name=name,color=discord.Color(color),permissions=discord.Permissions.none(),hoist=key not in ('staff_role','command_role'),mentionable=False,reason=f'EMS ranks requested by {i.user.id}')
+            # Existing permissions, names and member assignments are preserved.
+            if key in ('staff_role','command_role'): cfg[key]=r.id
+            else: rank_ids[key]=r.id
+            EMS_DB.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET data=excluded.data',(EMS_GUILD,json.dumps(cfg))); EMS_DB.commit()
+        await i.followup.send('✅ EMS roles ready: Chief, Deputy Chief, Captain, Paramedic, EMT, Trainee, Nurse, Physical Therapist, Therapist, Government, Patient, EMS Staff and EMS Command.\n\nGive active employees **EMS Staff + their rank/profession**. Give leadership **EMS Command** too. Trainees can have **EMS Trainee** alone for training-only access. Government alone has public access; it does not grant patient-record or staff access. Rank roles are labels; EMS Staff and EMS Command control bot access.\n\nIf channels are not set up yet, run `/setup_ems` and select the EMS Staff and EMS Command roles. Existing role permissions and assignments were kept.',ephemeral=True)
 
 @bot.tree.command(name='setup_ems',description='Set up compact EMS channels using your existing staff and command roles')
 @app_commands.default_permissions(administrator=True)
@@ -726,37 +814,90 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role,command_role:d
             EMS_DB.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET data=excluded.data',(EMS_GUILD,json.dumps(cfg))); EMS_DB.commit()
         save()
         def permissions(roles,public=False):
-            result={i.guild.default_role:discord.PermissionOverwrite(view_channel=public,send_messages=False),i.guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,manage_channels=True)}
-            for r in roles: result[r]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)
+            result={i.guild.default_role:discord.PermissionOverwrite(view_channel=public,send_messages=False),i.guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,manage_channels=True,connect=True,speak=True)}
+            for r in roles: result[r]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True,connect=True,speak=True)
             return result
         async def category(key,name,perms):
             ch=i.guild.get_channel(cfg.get(key,0))
             if not isinstance(ch,discord.CategoryChannel): ch=await i.guild.create_category(name,overwrites=perms)
-            else: await ch.edit(overwrites=perms)
+            else: await ch.edit(name=name,overwrites=perms)
             cfg[key]=ch.id; save(); return ch
-        public=await category('public_category','🚑 PROJECT 37 EMS',permissions([],True))
-        private=await category('staff_category','🔒 EMS STAFF',permissions([staff_role,command_role]))
+        public=await category('public_category','🏥 HOSPITAL HELP',permissions([],True))
+        patient=i.guild.get_role(cfg.get('rank_roles',{}).get('patient',0))
+        appointment_perms=permissions([])
+        if patient: appointment_perms[patient]=discord.PermissionOverwrite(view_channel=True,read_message_history=True,send_messages=False)
+        for r in (staff_role,command_role):
+            appointment_perms[r]=discord.PermissionOverwrite(view_channel=True,read_message_history=True,send_messages=False)
+        private=await category('staff_category','☕ STAFF LOUNGE',permissions([staff_role,command_role]))
+        clinical=await category('clinical_category','🏥 CLINICAL OPERATIONS',permissions([staff_role,command_role]))
+        command_section=await category('command_category','👑 EMS COMMAND',permissions([command_role]))
         await category('tickets','🎫 EMS PRIVATE TICKETS',permissions([command_role]))
+        trainee=i.guild.get_role(cfg.get('rank_roles',{}).get('trainee',0))
+        training_roles=[staff_role,command_role]+([trainee] if trainee else [])
+        training=await category('training_category','📚 IN TRAINING',permissions(training_roles))
+        # Staff can post resources; trainees can read without editing them.
+        resource_perms=permissions([staff_role,command_role])
+        if trainee and trainee not in (staff_role,command_role):
+            resource_perms[trainee]=discord.PermissionOverwrite(view_channel=True,read_message_history=True,send_messages=False)
+
         for key,name,parent,perms in [
-            ('desk','🚑・ems-front-desk',public,permissions([],True)),
+            ('desk','📨・apply-for-ems',public,permissions([],True)),
+            ('appointments','📅・book-appointment',public,appointment_perms),
             ('announcements','📢・ems-announcements',public,permissions([command_role],True)),
             ('information','📖・ems-information',public,permissions([command_role],True)),
             ('staff_chat','💬・ems-staff-chat',private,permissions([staff_role,command_role])),
-            ('records','📋・patient-records',private,permissions([staff_role,command_role])),
-            ('transcripts','🗂️・ems-transcripts',private,permissions([command_role]))]:
+            ('shift_updates','📅・shift-updates',private,permissions([staff_role,command_role])),
+            ('lounge_media','📸・ems-moments',private,permissions([staff_role,command_role])),
+            ('duty','⏱️・clock-in-out',private,permissions([staff_role,command_role])),
+            ('protocols','📚・medical-protocols',clinical,permissions([staff_role,command_role])),
+            ('command_chat','👑・command-chat',command_section,permissions([command_role])),
+            ('training_resources','📖・training-resources',training,resource_perms),
+            ('training_chat','💬・trainee-chat',training,permissions(training_roles)),
+            ('training_progress','✅・training-progress',training,permissions(training_roles)),
+            ('records','📋・patient-records',clinical,permissions([staff_role,command_role])),
+            ('transcripts','🗂️・ems-transcripts',command_section,permissions([command_role]))]:
             ch=i.guild.get_channel(cfg.get(key,0))
             if not isinstance(ch,discord.TextChannel): ch=await i.guild.create_text_channel(name,category=parent,overwrites=perms)
-            else: await ch.edit(overwrites=perms)
+            else: await ch.edit(name=name,category=parent,overwrites=perms)
             cfg[key]=ch.id; save()
+        for key,name,parent,perms in [
+            ('staff_voice','☕ Staff Break Room',private,permissions([staff_role,command_role])),
+            ('training_voice','🎓 Training Room',training,permissions(training_roles))]:
+            ch=i.guild.get_channel(cfg.get(key,0))
+            if not isinstance(ch,discord.VoiceChannel):
+                ch=await i.guild.create_voice_channel(name,category=parent,overwrites=perms)
+            else: await ch.edit(name=name,category=parent,overwrites=perms)
+            cfg[key]=ch.id; save()
+        duty=i.guild.get_channel(cfg['duty'])
+        duty_message=None
+        if cfg.get('duty_panel'):
+            try: duty_message=await duty.fetch_message(cfg['duty_panel'])
+            except discord.NotFound: pass
+        duty_embed=ems_embed('⏱️ EMS Duty Desk','Clock in at the start of your shift and clock out when finished. Use /ems_hours to view your totals.')
+        if duty_message and duty_message.author.id==bot.user.id:
+            await duty_message.edit(embed=duty_embed,view=EMSDutyView())
+        else:
+            duty_message=await duty.send(embed=duty_embed,view=EMSDutyView())
+            cfg['duty_panel']=duty_message.id; save()
         desk=i.guild.get_channel(cfg['desk']); msg=None
         if cfg.get('panel'):
             try: msg=await desk.fetch_message(cfg['panel'])
             except discord.NotFound: pass
-        e=ems_embed('🚑 Project 37 EMS','Need care or want to join the team? Open a private appointment or application ticket below.\n\nEMS staff: clock in when your shift begins and clock out when it ends.\n\nRoleplay characters and fictional patient records only.')
-        if msg and msg.author.id==bot.user.id: await msg.edit(embed=e,view=EMSPanel())
+        e=ems_embed('🚑 Join Project 37 EMS','Want to join the hospital team? Apply below. Applications are open to everyone and reviewed privately by EMS Command.')
+        if msg and msg.author.id==bot.user.id: await msg.edit(embed=e,view=EMSApplicationView())
         else:
-            msg=await desk.send(embed=e,view=EMSPanel()); cfg['panel']=msg.id; save()
-        await i.followup.send(f'✅ EMS setup ready in {desk.mention}. Existing roles selected; no new roles created. Staff use /ems_hours and /ems_patient_record. Applications are reviewed by command; staff assign accepted applicants their EMS role manually.',ephemeral=True)
+            msg=await desk.send(embed=e,view=EMSApplicationView()); cfg['panel']=msg.id; save()
+        appointments=i.guild.get_channel(cfg['appointments']); appointment_message=None
+        if cfg.get('appointment_panel'):
+            try: appointment_message=await appointments.fetch_message(cfg['appointment_panel'])
+            except discord.NotFound: pass
+        appointment_embed=ems_embed('📅 Book a Hospital Appointment','Patients: request an appointment below. Your details go into a private ticket with EMS. Use fictional roleplay patient information only.')
+        if appointment_message and appointment_message.author.id==bot.user.id:
+            await appointment_message.edit(embed=appointment_embed,view=EMSAppointmentView())
+        else:
+            appointment_message=await appointments.send(embed=appointment_embed,view=EMSAppointmentView())
+            cfg['appointment_panel']=appointment_message.id; save()
+        await i.followup.send(f'✅ EMS channels and In Training section ready. Front desk: {desk.mention}. Duty desk: {duty.mention}. Run /setup_ems_roles first if the Trainee role is missing, then rerun this command to grant training access. Staff use /ems_hours and /ems_patient_record. Applications are reviewed by command; staff assign accepted applicants their EMS role manually.',ephemeral=True)
 
 @bot.tree.command(name='ems_hours',description='View your EMS shift totals; command can view another member')
 async def ems_hours(i:discord.Interaction,member:discord.Member=None):
