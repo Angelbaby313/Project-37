@@ -802,9 +802,14 @@ async def setup_ems_roles(i:discord.Interaction):
 
 @bot.tree.command(name='setup_ems',description='Set up compact EMS channels using your existing staff and command roles')
 @app_commands.default_permissions(administrator=True)
-async def setup_ems(i:discord.Interaction,staff_role:discord.Role,command_role:discord.Role):
+async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_role:discord.Role=None):
     if not await ems_guard(i): return
     if not i.user.guild_permissions.administrator: return await deny(i,'Administrator permission is required.')
+    saved=ems_settings()
+    staff_role=staff_role or i.guild.get_role(saved.get('staff_role',0))
+    command_role=command_role or i.guild.get_role(saved.get('command_role',0))
+    if not staff_role or not command_role:
+        return await deny(i,'Run /setup_ems_roles first, or select EMS Staff and EMS Command once in this command. They will be remembered for future setup runs.')
     if staff_role.is_default() or command_role.is_default() or staff_role.managed or command_role.managed:
         return await deny(i,'Select existing EMS member roles, not @everyone or a bot/integration role.')
     await i.response.defer(ephemeral=True,thinking=True)
