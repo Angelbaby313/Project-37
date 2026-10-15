@@ -625,6 +625,7 @@ EMS_DB = sqlite3.connect(EMS_DIR / 'ems.sqlite3')
 EMS_DB.execute('CREATE TABLE IF NOT EXISTS settings (guild INTEGER PRIMARY KEY, data TEXT)')
 EMS_DB.execute('CREATE TABLE IF NOT EXISTS shifts (id INTEGER PRIMARY KEY, guild INTEGER, member INTEGER, started INTEGER, ended INTEGER)')
 EMS_DB.execute('CREATE TABLE IF NOT EXISTS tickets (channel INTEGER PRIMARY KEY, guild INTEGER, owner INTEGER, kind TEXT, closed INTEGER DEFAULT 0)')
+EMS_DB.execute('CREATE TABLE IF NOT EXISTS patient_threads (guild INTEGER, department TEXT, patient TEXT, thread INTEGER, PRIMARY KEY(guild,department,patient))')
 EMS_DB.commit()
 EMS_COMMANDS = {'setup_ems', 'setup_ems_roles', 'ems_hours', 'ems_patient_record'}
 
@@ -963,12 +964,33 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
             ('training_chat','💬・trainee-chat',training,permissions(training_roles)),
             ('qualification_test','📝・ems-qualification-test',training,resource_perms),
             ('training_progress','✅・training-progress',training,permissions(training_roles)),
-            ('records','📋・patient-records',clinical,permissions([staff_role,command_role])),
             ('transcripts','🗂️・ems-transcripts',command_section,permissions([command_role]))]:
             ch=i.guild.get_channel(cfg.get(key,0))
             if not isinstance(ch,discord.TextChannel): ch=await i.guild.create_text_channel(name,category=parent,overwrites=perms)
             else: await ch.edit(name=name,category=parent,overwrites=perms)
             cfg[key]=ch.id; save()
+        records_perms=permissions([staff_role,command_role])
+        for target in (i.guild.me,staff_role,command_role):
+            records_perms[target].send_messages_in_threads=True
+            records_perms[target].create_public_threads=True
+            records_perms[target].embed_links=True
+        records_perms[i.guild.me].manage_threads=True
+        for department,label in [('obgyn','obgyn'),('pediatric','pediatric'),('family','family-medicine')]:
+            key='records_'+department; name='📋・'+label+'-records'
+            forum=i.guild.get_channel(cfg.get(key,0))
+            topic='Fictional RP patient records only. One post per patient; add future visits as replies. Use /ems_patient_record with the same character name and department to keep visits together.'
+            if not isinstance(forum,discord.ForumChannel):
+                try: forum=await i.guild.create_forum(name,category=private,overwrites=records_perms,topic=topic)
+                except discord.HTTPException:
+                    await i.followup.send('Discord could not create a records forum. Check that Community is enabled in Server Settings and that the bot has Manage Channels, then rerun /setup_ems. Existing records were preserved.',ephemeral=True)
+                    raise
+            else: await forum.edit(name=name,category=private,overwrites=records_perms,topic=topic)
+            cfg[key]=forum.id; save()
+        legacy=i.guild.get_channel(cfg.get('records',0))
+        if isinstance(legacy,discord.TextChannel):
+            legacy_perms=permissions([staff_role,command_role])
+            for target in (staff_role,command_role): legacy_perms[target].send_messages=False
+            await legacy.edit(name='📁・old-patient-records',category=private,overwrites=legacy_perms,topic='Previous patient records preserved here. New visits belong in the department forums; use /ems_patient_record.')
         for key,name,parent,perms in [
             ('staff_voice','☕ Staff Break Room',private,permissions([staff_role,command_role])),
             ('waiting_voice','🛋️ Patient Waiting Room',waiting,waiting_perms),
@@ -1033,16 +1055,49 @@ async def ems_hours(i:discord.Interaction,member:discord.Member=None):
     total=sum(max(0,(end or int(time.time()))-start) for start,end in rows)
     await deny(i,f'{target.display_name}: {total/3600:.2f} total hours. '+('Currently clocked in.' if any(end is None for _,end in rows) else 'Currently clocked out.'))
 
-@bot.tree.command(name='ems_patient_record',description='File a fictional RP patient record in the staff-only records channel')
-async def ems_patient_record(i:discord.Interaction,character_name:str,notes:str):
+RECORD_SPECIALTIES={'obgyn':'OBGYN','pediatric':'Pediatric','family':'Family Medicine'}
+
+@bot.tree.command(name='ems_patient_record',description='Add an RP visit to the patient’s post in their department records forum')
+@app_commands.choices(department=[app_commands.Choice(name=name,value=key) for key,name in RECORD_SPECIALTIES.items()])
+async def ems_patient_record(i:discord.Interaction,department:str,character_name:str,notes:str):
     if not await ems_guard(i,staff=True): return
-    if len(character_name)>200 or len(notes)>3500: return await deny(i,'Use at most 200 characters for the name and 3,500 for notes.')
-    ch=i.guild.get_channel(ems_settings().get('records',0))
-    if not isinstance(ch,discord.TextChannel): return await deny(i,'Run /setup_ems first.')
+    character_name=' '.join(character_name.split())
+    if department not in RECORD_SPECIALTIES: return await deny(i,'Choose OBGYN, Pediatric, or Family Medicine.')
+    if not character_name or len(character_name)>90 or not notes.strip() or len(notes)>3500:
+        return await deny(i,'Enter a character name (up to 90 characters) and visit notes (up to 3,500 characters).')
+    forum=i.guild.get_channel(ems_settings().get('records_'+department,0))
+    if not isinstance(forum,discord.ForumChannel): return await deny(i,'Run /setup_ems to create the department records forums first.')
     await i.response.defer(ephemeral=True)
-    e=ems_embed('RP Patient Record • '+character_name,notes); e.add_field(name='Filed by',value=i.user.mention); e.timestamp=discord.utils.utcnow()
-    await ch.send(embed=e,allowed_mentions=discord.AllowedMentions.none())
-    await i.followup.send('Fictional patient record saved.',ephemeral=True)
+    patient_key=character_name.casefold()
+    async with LOCKS.setdefault(('ems-patient',EMS_GUILD,department,patient_key),asyncio.Lock()):
+        row=EMS_DB.execute('SELECT thread FROM patient_threads WHERE guild=? AND department=? AND patient=?',(EMS_GUILD,department,patient_key)).fetchone()
+        thread=None
+        if row:
+            thread=i.guild.get_thread(row[0])
+            if not thread:
+                try: thread=await i.guild.fetch_channel(row[0])
+                except discord.NotFound: pass
+            if thread and (not isinstance(thread,discord.Thread) or thread.parent_id!=forum.id):
+                return await deny(i,'The saved patient post no longer belongs to this records forum. Ask Command to check it before creating another record.')
+        if not thread:
+            # Reuse manually created posts too; check active and archived posts.
+            matches=[t for t in forum.threads if t.name.casefold()==patient_key]
+            async for archived in forum.archived_threads(limit=None):
+                if archived.name.casefold()==patient_key: matches.append(archived)
+            unique={t.id:t for t in matches}
+            if len(unique)>1: return await deny(i,'Multiple posts match this patient name. Ask Command to merge or rename them first.')
+            thread=next(iter(unique.values()),None)
+        e=ems_embed('RP Visit • '+character_name,notes)
+        e.add_field(name='Department',value=RECORD_SPECIALTIES[department]); e.add_field(name='Filed by',value=i.user.mention); e.timestamp=discord.utils.utcnow()
+        if thread:
+            if thread.locked: return await deny(i,'This patient post is locked. Ask Command to unlock it before adding a visit.')
+            if thread.archived: await thread.edit(archived=False,reason='Add EMS patient visit')
+            await thread.send(embed=e,allowed_mentions=discord.AllowedMentions.none())
+        else:
+            result=await forum.create_thread(name=character_name,embed=e,reason=f'RP patient record filed by {i.user.id}',allowed_mentions=discord.AllowedMentions.none())
+            thread=result.thread
+        EMS_DB.execute('INSERT INTO patient_threads VALUES(?,?,?,?) ON CONFLICT(guild,department,patient) DO UPDATE SET thread=excluded.thread',(EMS_GUILD,department,patient_key,thread.id)); EMS_DB.commit()
+        await i.followup.send(f'Visit saved in {thread.mention}. Use the same character name and department for future visits.',ephemeral=True)
 
 # Block commands outside their intended server, including any stale guild commands.
 async def server_scope_check(i):
