@@ -926,7 +926,10 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
         if patient: appointment_perms[patient]=discord.PermissionOverwrite(view_channel=True,read_message_history=True,send_messages=False)
         for r in (staff_role,command_role):
             appointment_perms[r]=discord.PermissionOverwrite(view_channel=True,read_message_history=True,send_messages=False)
-        private=await category('staff_category','🚑 EMS STAFF',permissions([staff_role,command_role]))
+        waiting_roles=([patient] if patient else [])+[staff_role,command_role]
+        waiting_perms=permissions(waiting_roles)
+        waiting=await category('waiting_category','🛋️ PATIENT WAITING ROOM',waiting_perms)
+        private=await category('staff_category','☕ STAFF LOUNGE',permissions([staff_role,command_role]))
         old_clinical=i.guild.get_channel(cfg.get('clinical_category',0))
         clinical=private
         closet=await category('closet_category','👕 EMS CLOSET',permissions([staff_role,command_role]))
@@ -944,8 +947,10 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
         for key,name,parent,perms in [
             ('desk','📨・apply-for-ems',public,permissions([],True)),
             ('appointments','📅・book-appointment',public,appointment_perms),
-            ('announcements','📢・ems-announcements',public,permissions([command_role],True)),
-            ('information','📖・ems-information',public,permissions([command_role],True)),
+            ('hospital_rules','📜・hospital-rules',public,permissions([command_role],True)),
+            ('announcements','📢・hospital-announcements',public,permissions([command_role],True)),
+            ('information','📖・hospital-info',public,permissions([command_role],True)),
+            ('patient_chat','💬・front-desk',waiting,waiting_perms),
             ('staff_chat','💬・ems-staff-chat',private,permissions([staff_role,command_role])),
             ('shift_updates','📅・shift-updates',private,permissions([staff_role,command_role])),
             ('lounge_media','📸・ems-moments',private,permissions([staff_role,command_role])),
@@ -966,6 +971,7 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
             cfg[key]=ch.id; save()
         for key,name,parent,perms in [
             ('staff_voice','☕ Staff Break Room',private,permissions([staff_role,command_role])),
+            ('waiting_voice','🛋️ Patient Waiting Room',waiting,waiting_perms),
             ('training_voice','🎓 Training Room',training,permissions(training_roles))]:
             ch=i.guild.get_channel(cfg.get(key,0))
             if not isinstance(ch,discord.VoiceChannel):
@@ -1016,7 +1022,7 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
         else:
             appointment_message=await appointments.send(embed=appointment_embed,view=EMSAppointmentView())
             cfg['appointment_panel']=appointment_message.id; save()
-        await i.followup.send(f'✅ EMS channels and In Training section ready. Front desk: {desk.mention}. Duty desk: {duty.mention}. Run /setup_ems_roles first if the Trainee role is missing, then rerun this command to grant training access. Staff use /ems_hours and /ems_patient_record. Applications are reviewed by command; staff assign accepted applicants their EMS role manually.',ephemeral=True)
+        await i.followup.send(f'✅ EMS channels and In Training section ready. Applications: {desk.mention}. Patient chat: <#{cfg["patient_chat"]}>. Duty desk: {duty.mention}. Run /setup_ems_roles first if the Trainee role is missing, then rerun this command to grant training access. Staff use /ems_hours and /ems_patient_record. Applications are reviewed by command; staff assign accepted applicants their EMS role manually.',ephemeral=True)
 
 @bot.tree.command(name='ems_hours',description='View your EMS shift totals; command can view another member')
 async def ems_hours(i:discord.Interaction,member:discord.Member=None):
