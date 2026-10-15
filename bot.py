@@ -215,8 +215,18 @@ class ProjectBot(commands.Bot):
     async def setup_hook(self):
         self.add_view(EntryView(['verify','whitelist','donation','support','report','female','ems','pd','realestate']))
         self.add_view(TicketControls())
-        self.tree.copy_global_to(guild=discord.Object(id=GUILD))
-        await self.tree.sync(guild=discord.Object(id=GUILD))
+        self.add_view(EMSPanel())
+        self.add_view(EMSClose())
+        if EMS_GUILD and EMS_GUILD == GUILD:
+            raise RuntimeError('EMS_GUILD_ID must differ from GUILD_ID')
+        for guild_id, ems in [(GUILD, False), (EMS_GUILD, True)]:
+            if not guild_id: continue
+            target = discord.Object(id=guild_id)
+            self.tree.clear_commands(guild=target)
+            for command in self.tree.get_commands():
+                if (command.name in EMS_COMMANDS) == ems:
+                    self.tree.add_command(command, guild=target)
+            await self.tree.sync(guild=target)
 
 bot=ProjectBot()
 
@@ -593,6 +603,191 @@ async def unregister_stream(i:discord.Interaction):
             except discord.NotFound: pass
         DB.execute('DELETE FROM streams WHERE guild=? AND owner=?',(i.guild_id,i.user.id)); DB.commit()
         await i.followup.send('Your saved streamer card was removed.',ephemeral=True)
+
+# EMS features are isolated from the main city's role/channel configuration.
+import time
+EMS_GUILD = int(os.getenv('EMS_GUILD_ID', '0'))
+EMS_DIR = Path(os.getenv('EMS_DATA_DIR', str(ROOT)))
+EMS_DIR.mkdir(parents=True, exist_ok=True)
+EMS_DB = sqlite3.connect(EMS_DIR / 'ems.sqlite3')
+EMS_DB.execute('CREATE TABLE IF NOT EXISTS settings (guild INTEGER PRIMARY KEY, data TEXT)')
+EMS_DB.execute('CREATE TABLE IF NOT EXISTS shifts (id INTEGER PRIMARY KEY, guild INTEGER, member INTEGER, started INTEGER, ended INTEGER)')
+EMS_DB.execute('CREATE TABLE IF NOT EXISTS tickets (channel INTEGER PRIMARY KEY, guild INTEGER, owner INTEGER, kind TEXT, closed INTEGER DEFAULT 0)')
+EMS_DB.commit()
+EMS_COMMANDS = {'setup_ems', 'ems_hours', 'ems_patient_record'}
+
+def ems_settings():
+    row = EMS_DB.execute('SELECT data FROM settings WHERE guild=?', (EMS_GUILD,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+def ems_staff(member, command=False):
+    cfg = ems_settings()
+    key = 'command_role' if command else 'staff_role'
+    ids = {cfg.get(key), cfg.get('command_role')}
+    return member.guild_permissions.administrator or any(r.id in ids for r in member.roles)
+
+async def ems_guard(i, staff=False, command=False):
+    if not EMS_GUILD or i.guild_id != EMS_GUILD:
+        await deny(i, 'This action is available only in the configured EMS Discord.')
+        return False
+    if (staff or command) and not ems_staff(i.user, command):
+        await deny(i, 'EMS command permission is required.' if command else 'EMS staff permission is required.')
+        return False
+    return True
+
+def ems_embed(title, text):
+    return discord.Embed(title=title, description=text, color=0xE74C3C).set_footer(text='Project 37 EMS • Roleplay department')
+
+class EMSModal(discord.ui.Modal):
+    def __init__(self, kind):
+        super().__init__(title='EMS Application' if kind == 'application' else 'EMS Appointment', timeout=600)
+        self.kind = kind
+        questions = (['Character name / age', 'EMS experience', 'Availability and timezone', 'Why do you want to join EMS?'] if kind == 'application' else ['Character name', 'Appointment reason', 'Preferred date, time and timezone'])
+        for q in questions:
+            self.add_item(discord.ui.TextInput(label=q, style=discord.TextStyle.paragraph, max_length=800))
+    async def on_submit(self, i):
+        if not await ems_guard(i): return
+        await i.response.defer(ephemeral=True)
+        async with LOCKS.setdefault(('ems-ticket', i.user.id, self.kind), asyncio.Lock()):
+            cfg = ems_settings()
+            for (cid,) in EMS_DB.execute('SELECT channel FROM tickets WHERE guild=? AND owner=? AND kind=? AND closed=0', (EMS_GUILD,i.user.id,self.kind)).fetchall():
+                if i.guild.get_channel(cid): return await deny(i, f'Your ticket is already open: <#{cid}>.')
+                EMS_DB.execute('UPDATE tickets SET closed=1 WHERE channel=?', (cid,))
+            category = i.guild.get_channel(cfg.get('tickets', 0))
+            team = i.guild.get_role(cfg.get('command_role' if self.kind == 'application' else 'staff_role', 0))
+            command = i.guild.get_role(cfg.get('command_role', 0))
+            if not isinstance(category, discord.CategoryChannel) or not team or not command:
+                return await deny(i, 'Ask an administrator to run /setup_ems first.')
+            perms = {i.guild.default_role: discord.PermissionOverwrite(view_channel=False), i.guild.me: discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True), i.user: discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)}
+            for r in (team, command): perms[r] = discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)
+            ch = await i.guild.create_text_channel(f'{self.kind}-{i.user.id}', category=category, overwrites=perms)
+            EMS_DB.execute('INSERT INTO tickets(channel,guild,owner,kind) VALUES(?,?,?,?)',(ch.id,EMS_GUILD,i.user.id,self.kind)); EMS_DB.commit()
+            e = ems_embed('EMS '+self.kind.title(), f'Opened by {i.user.mention}')
+            for field in self.children: e.add_field(name=field.label,value=field.value,inline=False)
+            await ch.send(embed=e,view=EMSClose())
+            await i.followup.send(f'Ticket ready: {ch.mention}',ephemeral=True)
+    async def on_error(self,i,error):
+        logging.error('EMS ticket failed',exc_info=(type(error),error,error.__traceback__))
+        await deny(i,'Could not finish opening the ticket. Check for an existing ticket and ask an administrator to check bot permissions.')
+
+class EMSClose(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label='Close & save transcript',style=discord.ButtonStyle.danger,custom_id='p37ems:close')
+    async def close(self,i,button):
+        if not await ems_guard(i,command=True): return
+        await i.response.defer(ephemeral=True)
+        async with LOCKS.setdefault(('ems-close',i.channel_id),asyncio.Lock()):
+            row=EMS_DB.execute('SELECT owner,kind,closed FROM tickets WHERE channel=? AND guild=?',(i.channel_id,EMS_GUILD)).fetchone()
+            if not row or row[2]: return await deny(i,'This is not an open EMS ticket.')
+            logs=i.guild.get_channel(ems_settings().get('transcripts',0))
+            if not isinstance(logs,discord.TextChannel) or logs==i.channel: return await deny(i,'Run /setup_ems to configure transcripts first.')
+            lines=[]
+            async for m in i.channel.history(limit=None,oldest_first=True):
+                fields='\n'.join((e.title or '')+'\n'+(e.description or '')+'\n'+'\n'.join(f'{f.name}: {f.value}' for f in e.fields) for e in m.embeds)
+                lines.append(f'[{m.created_at.isoformat()}] {m.author} ({m.author.id}): {m.content}\n{fields}\n'+ '\n'.join(a.url for a in m.attachments))
+            await logs.send(content=f'EMS {row[1]} • owner {row[0]} • closed by {i.user.id}',file=discord.File(io.BytesIO('\n\n'.join(lines).encode()),filename=f'ems-{i.channel_id}.txt'))
+            EMS_DB.execute('UPDATE tickets SET closed=1 WHERE channel=?',(i.channel_id,)); EMS_DB.commit()
+            await i.followup.send('Transcript saved. Closing ticket.',ephemeral=True)
+            await i.channel.delete(reason=f'EMS ticket closed by {i.user.id}')
+
+class EMSPanel(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label='Clock in',style=discord.ButtonStyle.success,custom_id='p37ems:in')
+    async def clock_in(self,i,button):
+        if not await ems_guard(i,staff=True): return
+        if EMS_DB.execute('SELECT 1 FROM shifts WHERE guild=? AND member=? AND ended IS NULL',(EMS_GUILD,i.user.id)).fetchone(): return await deny(i,'You are already clocked in.')
+        EMS_DB.execute('INSERT INTO shifts(guild,member,started) VALUES(?,?,?)',(EMS_GUILD,i.user.id,int(time.time()))); EMS_DB.commit()
+        await deny(i,'✅ Clocked in. Stay safe out there!')
+    @discord.ui.button(label='Clock out',style=discord.ButtonStyle.secondary,custom_id='p37ems:out')
+    async def clock_out(self,i,button):
+        if not await ems_guard(i,staff=True): return
+        row=EMS_DB.execute('SELECT id,started FROM shifts WHERE guild=? AND member=? AND ended IS NULL',(EMS_GUILD,i.user.id)).fetchone()
+        if not row: return await deny(i,'You are not clocked in.')
+        now=int(time.time()); EMS_DB.execute('UPDATE shifts SET ended=? WHERE id=?',(now,row[0])); EMS_DB.commit()
+        await deny(i,f'✅ Clocked out. Shift length: {(now-row[1])/3600:.2f} hours.')
+    @discord.ui.button(label='Book appointment',style=discord.ButtonStyle.primary,custom_id='p37ems:appointment')
+    async def appointment(self,i,button):
+        if await ems_guard(i): await i.response.send_modal(EMSModal('appointment'))
+    @discord.ui.button(label='Apply for EMS',style=discord.ButtonStyle.primary,custom_id='p37ems:application')
+    async def application(self,i,button):
+        if await ems_guard(i): await i.response.send_modal(EMSModal('application'))
+
+@bot.tree.command(name='setup_ems',description='Set up compact EMS channels using your existing staff and command roles')
+@app_commands.default_permissions(administrator=True)
+async def setup_ems(i:discord.Interaction,staff_role:discord.Role,command_role:discord.Role):
+    if not await ems_guard(i): return
+    if not i.user.guild_permissions.administrator: return await deny(i,'Administrator permission is required.')
+    if staff_role.is_default() or command_role.is_default() or staff_role.managed or command_role.managed:
+        return await deny(i,'Select existing EMS member roles, not @everyone or a bot/integration role.')
+    await i.response.defer(ephemeral=True,thinking=True)
+    async with LOCKS.setdefault('ems-setup',asyncio.Lock()):
+        cfg=ems_settings(); cfg.update(staff_role=staff_role.id,command_role=command_role.id)
+        def save():
+            EMS_DB.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET data=excluded.data',(EMS_GUILD,json.dumps(cfg))); EMS_DB.commit()
+        save()
+        def permissions(roles,public=False):
+            result={i.guild.default_role:discord.PermissionOverwrite(view_channel=public,send_messages=False),i.guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,manage_channels=True)}
+            for r in roles: result[r]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)
+            return result
+        async def category(key,name,perms):
+            ch=i.guild.get_channel(cfg.get(key,0))
+            if not isinstance(ch,discord.CategoryChannel): ch=await i.guild.create_category(name,overwrites=perms)
+            else: await ch.edit(overwrites=perms)
+            cfg[key]=ch.id; save(); return ch
+        public=await category('public_category','🚑 PROJECT 37 EMS',permissions([],True))
+        private=await category('staff_category','🔒 EMS STAFF',permissions([staff_role,command_role]))
+        await category('tickets','🎫 EMS PRIVATE TICKETS',permissions([command_role]))
+        for key,name,parent,perms in [
+            ('desk','🚑・ems-front-desk',public,permissions([],True)),
+            ('announcements','📢・ems-announcements',public,permissions([command_role],True)),
+            ('information','📖・ems-information',public,permissions([command_role],True)),
+            ('staff_chat','💬・ems-staff-chat',private,permissions([staff_role,command_role])),
+            ('records','📋・patient-records',private,permissions([staff_role,command_role])),
+            ('transcripts','🗂️・ems-transcripts',private,permissions([command_role]))]:
+            ch=i.guild.get_channel(cfg.get(key,0))
+            if not isinstance(ch,discord.TextChannel): ch=await i.guild.create_text_channel(name,category=parent,overwrites=perms)
+            else: await ch.edit(overwrites=perms)
+            cfg[key]=ch.id; save()
+        desk=i.guild.get_channel(cfg['desk']); msg=None
+        if cfg.get('panel'):
+            try: msg=await desk.fetch_message(cfg['panel'])
+            except discord.NotFound: pass
+        e=ems_embed('🚑 Project 37 EMS','Need care or want to join the team? Open a private appointment or application ticket below.\n\nEMS staff: clock in when your shift begins and clock out when it ends.\n\nRoleplay characters and fictional patient records only.')
+        if msg and msg.author.id==bot.user.id: await msg.edit(embed=e,view=EMSPanel())
+        else:
+            msg=await desk.send(embed=e,view=EMSPanel()); cfg['panel']=msg.id; save()
+        await i.followup.send(f'✅ EMS setup ready in {desk.mention}. Existing roles selected; no new roles created. Staff use /ems_hours and /ems_patient_record. Applications are reviewed by command; staff assign accepted applicants their EMS role manually.',ephemeral=True)
+
+@bot.tree.command(name='ems_hours',description='View your EMS shift totals; command can view another member')
+async def ems_hours(i:discord.Interaction,member:discord.Member=None):
+    if not await ems_guard(i,staff=True): return
+    target=member or i.user
+    if target.id!=i.user.id and not ems_staff(i.user,True): return await deny(i,'Only command can view another member’s hours.')
+    rows=EMS_DB.execute('SELECT started,ended FROM shifts WHERE guild=? AND member=?',(EMS_GUILD,target.id)).fetchall()
+    total=sum(max(0,(end or int(time.time()))-start) for start,end in rows)
+    await deny(i,f'{target.display_name}: {total/3600:.2f} total hours. '+('Currently clocked in.' if any(end is None for _,end in rows) else 'Currently clocked out.'))
+
+@bot.tree.command(name='ems_patient_record',description='File a fictional RP patient record in the staff-only records channel')
+async def ems_patient_record(i:discord.Interaction,character_name:str,notes:str):
+    if not await ems_guard(i,staff=True): return
+    if len(character_name)>200 or len(notes)>3500: return await deny(i,'Use at most 200 characters for the name and 3,500 for notes.')
+    ch=i.guild.get_channel(ems_settings().get('records',0))
+    if not isinstance(ch,discord.TextChannel): return await deny(i,'Run /setup_ems first.')
+    await i.response.defer(ephemeral=True)
+    e=ems_embed('RP Patient Record • '+character_name,notes); e.add_field(name='Filed by',value=i.user.mention); e.timestamp=discord.utils.utcnow()
+    await ch.send(embed=e,allowed_mentions=discord.AllowedMentions.none())
+    await i.followup.send('Fictional patient record saved.',ephemeral=True)
+
+# Block commands outside their intended server, including any stale guild commands.
+async def server_scope_check(i):
+    name=i.command.name if i.command else ''
+    expected=EMS_GUILD if name in EMS_COMMANDS else GUILD
+    if not expected or i.guild_id!=expected:
+        await deny(i,'This command belongs to the other Project 37 Discord.')
+        return False
+    return True
+bot.tree.interaction_check=server_scope_check
+
 
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
