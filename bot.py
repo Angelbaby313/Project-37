@@ -619,7 +619,7 @@ async def unregister_stream(i:discord.Interaction):
 # EMS features are isolated from the main city's role/channel configuration.
 import time
 EMS_GUILD = int(os.getenv('EMS_GUILD_ID', '0'))
-EMS_DIR = Path(os.getenv('EMS_DATA_DIR', str(ROOT)))
+EMS_DIR = Path(os.getenv('EMS_DATA_DIR') or os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or str(ROOT))
 EMS_DIR.mkdir(parents=True, exist_ok=True)
 EMS_DB = sqlite3.connect(EMS_DIR / 'ems.sqlite3')
 EMS_DB.execute('CREATE TABLE IF NOT EXISTS settings (guild INTEGER PRIMARY KEY, data TEXT)')
@@ -916,8 +916,37 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
             result={i.guild.default_role:discord.PermissionOverwrite(view_channel=public,send_messages=False),i.guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,manage_channels=True,connect=True,speak=True)}
             for r in roles: result[r]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True,connect=True,speak=True)
             return result
+        aliases={
+            'staff_category': ['🚑 EMS STAFF','🔒 EMS STAFF'],
+            'public_category': ['🚑 PROJECT 37 EMS'],
+            'desk': ['🚑・ems-front-desk'],
+            'announcements': ['📢・ems-announcements'],
+            'information': ['📖・ems-information'],
+            'staff_voice': ['🚑 EMS Staff Room'],
+        }
+        def existing(key,name,kind,parent=None):
+            saved=i.guild.get_channel(cfg.get(key,0))
+            if isinstance(saved,kind): return saved
+            names={name.casefold(),*(n.casefold() for n in aliases.get(key,[]))}
+            matches=[ch for ch in i.guild.channels if isinstance(ch,kind) and ch.name.casefold() in names]
+            scoped=[ch for ch in matches if parent and ch.category_id==parent.id]
+            choices=scoped or matches
+            if len(choices)>1:
+                logging.warning('EMS setup found existing duplicates for %s; reusing oldest, preserving all others',key)
+            return min(choices,key=lambda ch:ch.id) if choices else None
+        async def existing_panel(channel,key,custom_id):
+            if cfg.get(key):
+                try:
+                    message=await channel.fetch_message(cfg[key])
+                    if message.author.id==bot.user.id: return message
+                except discord.NotFound: pass
+            async for message in channel.history(limit=200):
+                if message.author.id!=bot.user.id: continue
+                if any(getattr(component,'custom_id',None)==custom_id for row in message.components for component in getattr(row,'children',[])):
+                    cfg[key]=message.id; save(); return message
+            return None
         async def category(key,name,perms):
-            ch=i.guild.get_channel(cfg.get(key,0))
+            ch=existing(key,name,discord.CategoryChannel)
             if not isinstance(ch,discord.CategoryChannel): ch=await i.guild.create_category(name,overwrites=perms)
             else: await ch.edit(name=name,overwrites=perms)
             cfg[key]=ch.id; save(); return ch
@@ -965,7 +994,7 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
             ('qualification_test','📝・ems-qualification-test',training,resource_perms),
             ('training_progress','✅・training-progress',training,permissions(training_roles)),
             ('transcripts','🗂️・ems-transcripts',command_section,permissions([command_role]))]:
-            ch=i.guild.get_channel(cfg.get(key,0))
+            ch=existing(key,name,discord.TextChannel,parent)
             if not isinstance(ch,discord.TextChannel): ch=await i.guild.create_text_channel(name,category=parent,overwrites=perms)
             else: await ch.edit(name=name,category=parent,overwrites=perms)
             cfg[key]=ch.id; save()
@@ -977,7 +1006,7 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
         records_perms[i.guild.me].manage_threads=True
         for department,label in [('obgyn','obgyn'),('pediatric','pediatric'),('family','family-medicine')]:
             key='records_'+department; name='📋・'+label+'-records'
-            forum=i.guild.get_channel(cfg.get(key,0))
+            forum=existing(key,name,discord.ForumChannel,private)
             topic='Fictional RP patient records only. One post per patient; add future visits as replies. Use /ems_patient_record with the same character name and department to keep visits together.'
             if not isinstance(forum,discord.ForumChannel):
                 try: forum=await i.guild.create_forum(name,category=private,overwrites=records_perms,topic=topic)
@@ -995,7 +1024,7 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
             ('staff_voice','☕ Staff Break Room',private,permissions([staff_role,command_role])),
             ('waiting_voice','🛋️ Patient Waiting Room',waiting,waiting_perms),
             ('training_voice','🎓 Training Room',training,permissions(training_roles))]:
-            ch=i.guild.get_channel(cfg.get(key,0))
+            ch=existing(key,name,discord.VoiceChannel,parent)
             if not isinstance(ch,discord.VoiceChannel):
                 ch=await i.guild.create_voice_channel(name,category=parent,overwrites=perms)
             else: await ch.edit(name=name,category=parent,overwrites=perms)
@@ -1007,37 +1036,28 @@ async def setup_ems(i:discord.Interaction,staff_role:discord.Role=None,command_r
             if not old_clinical.channels:
                 await old_clinical.delete(reason='Empty clinical category merged into EMS Staff')
                 cfg.pop('clinical_category',None); save()
-        exam_channel=i.guild.get_channel(cfg['qualification_test']); exam_message=None
-        if cfg.get('exam_panel'):
-            try: exam_message=await exam_channel.fetch_message(cfg['exam_panel'])
-            except discord.NotFound: pass
+        exam_channel=i.guild.get_channel(cfg['qualification_test'])
+        exam_message=await existing_panel(exam_channel,'exam_panel','p37ems:exam:start')
         exam_embed=ems_embed('📝 Become an Official EMT','Complete five written roleplay questions. A Trainer or Command member reviews your answers before awarding EMS Staff and EMT.\n\nTopics: scene safety, unresponsive patients, resuscitation RP, refusal of care, and hospital handoff. Follow the city protocols and do not force outcomes. This is a FiveM department test, not a medical certification.')
         if exam_message and exam_message.author.id==bot.user.id: await exam_message.edit(embed=exam_embed,view=EMSExamEntry())
         else:
             exam_message=await exam_channel.send(embed=exam_embed,view=EMSExamEntry()); cfg['exam_panel']=exam_message.id; save()
         duty=i.guild.get_channel(cfg['duty'])
-        duty_message=None
-        if cfg.get('duty_panel'):
-            try: duty_message=await duty.fetch_message(cfg['duty_panel'])
-            except discord.NotFound: pass
+        duty_message=await existing_panel(duty,'duty_panel','p37ems:in')
         duty_embed=ems_embed('⏱️ EMS Duty Desk','Clock in at the start of your shift and clock out when finished. Use /ems_hours to view your totals.')
         if duty_message and duty_message.author.id==bot.user.id:
             await duty_message.edit(embed=duty_embed,view=EMSDutyView())
         else:
             duty_message=await duty.send(embed=duty_embed,view=EMSDutyView())
             cfg['duty_panel']=duty_message.id; save()
-        desk=i.guild.get_channel(cfg['desk']); msg=None
-        if cfg.get('panel'):
-            try: msg=await desk.fetch_message(cfg['panel'])
-            except discord.NotFound: pass
+        desk=i.guild.get_channel(cfg['desk'])
+        msg=await existing_panel(desk,'panel','p37ems:application')
         e=ems_embed('🚑 Join Project 37 EMS','Want to join the hospital team? Apply below. Applications are open to everyone and reviewed privately by EMS Command.')
         if msg and msg.author.id==bot.user.id: await msg.edit(embed=e,view=EMSApplicationView())
         else:
             msg=await desk.send(embed=e,view=EMSApplicationView()); cfg['panel']=msg.id; save()
-        appointments=i.guild.get_channel(cfg['appointments']); appointment_message=None
-        if cfg.get('appointment_panel'):
-            try: appointment_message=await appointments.fetch_message(cfg['appointment_panel'])
-            except discord.NotFound: pass
+        appointments=i.guild.get_channel(cfg['appointments'])
+        appointment_message=await existing_panel(appointments,'appointment_panel','p37ems:book:obgyn')
         appointment_embed=ems_embed('📅 Book a Hospital Appointment','Patients: select OBGYN, Primary Care, or Pediatrician below. Your requested service and details go into a private ticket with EMS. Use fictional roleplay patient information only.')
         if appointment_message and appointment_message.author.id==bot.user.id:
             await appointment_message.edit(embed=appointment_embed,view=EMSAppointmentView())
