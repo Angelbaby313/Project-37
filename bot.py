@@ -221,6 +221,8 @@ class ProjectBot(commands.Bot):
         self.add_view(EMSExamEntry())
         self.add_view(EMSExamReview())
         self.add_view(EMSAppointmentView())
+        self.add_view(CommunityRoleView(['creators','relationship','age']))
+        self.add_view(CommunityRoleView(['adult','funny','personality']))
         if EMS_GUILD and EMS_GUILD == GUILD:
             raise RuntimeError('EMS_GUILD_ID must differ from GUILD_ID')
         for guild_id, ems in [(GUILD, False), (EMS_GUILD, True)]:
@@ -1178,6 +1180,134 @@ async def add_community_roles(i:discord.Interaction):
             tmp.write_text(json.dumps(CFG,indent=2,ensure_ascii=False),encoding='utf-8'); tmp.replace(ROOT/'config.json')
             lines.append(f'{emoji} {r.mention} — '+('created' if created else 'already exists'))
         await i.followup.send('✅ Project 37 identity roles ready:\n'+'\n'.join(lines)+'\n\nAssign these roles manually. Newly created roles have no extra permissions. Custom emojis display in this message; Discord role names cannot render custom emoji markup.',ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
+
+# Community self roles never grant verified/WL/staff or approved creator roles.
+SELF_ROLE_GROUPS = {
+    'creators': ('🎨 Creators', False, [
+        ('photographer','📸 Photographer'),('streamer','🎥 Streamer • Community'),
+        ('content_creator','🎬 Content Creator'),('designer','🎨 Designer')]),
+    'relationship': ('💘 Relationship', True, [
+        ('single','💚 SINGLE'),('taken','💍 TAKEN'),('married','💒 Married'),
+        ('complicated','💔 It’s Complicated'),('looking','👀 Just Looking')]),
+    'age': ('🎂 Age — self-reported', True, [
+        ('18_24','✨ 18–24'),('25_29','🥂 25–29'),('30_plus','🍷 30+')]),
+    'adult': ('😈 Adult RP Vibes — optional', False, [
+        ('erp_demon','😈 ERP DEMON'),('homewrecker','💔 HOMEWRECKER'),
+        ('tease','🫦 Certified Tease'),('bedroom_bully','🔥 Bedroom Bully'),
+        ('shy','🙈 Shy Until Private'),('pillow_princess','💅 Pillow Princess'),
+        ('freak','🥵 Freak After Dark')]),
+    'funny': ('😂 Funny', False, [
+        ('red_flag','🚩 Walking Red Flag'),('delusional','🤡 Professionally Delusional'),
+        ('receipts','🧾 Got Receipts'),('mess','👀 Here for the Mess'),
+        ('commitment','🏃 Commitment Issues'),('broke','💸 Financially Irresponsible'),
+        ('problem','🛑 Somebody’s Problem')]),
+    'personality': ('🎭 City Personality', False, [
+        ('business','💰 Business Minded'),('social','🦋 Social Butterfly'),
+        ('night','🌙 Night Owl'),('cars','🏎️ Car Enthusiast'),
+        ('family','🏡 Family First'),('party','🎉 Party Starter'),('unbothered','🧊 Unbothered')]),
+}
+EMS_DB.execute('CREATE TABLE IF NOT EXISTS community_settings (guild INTEGER PRIMARY KEY, data TEXT)')
+EMS_DB.commit()
+
+def self_role_settings():
+    row=EMS_DB.execute('SELECT data FROM community_settings WHERE guild=?',(GUILD,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+def save_self_role_settings(data):
+    EMS_DB.execute('INSERT INTO community_settings VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET data=excluded.data',(GUILD,json.dumps(data)))
+    EMS_DB.commit()
+
+def protected_self_role_ids():
+    return {int(value) for key,value in CFG.get('roles',{}).items() if value and not key.startswith('community_')}
+
+class CommunityRoleSelect(discord.ui.Select):
+    def __init__(self,group):
+        label,single,options=SELF_ROLE_GROUPS[group]
+        self.group=group
+        super().__init__(placeholder=label,custom_id='p37:selfroles:'+group,min_values=0,max_values=1 if single else len(options),options=[discord.SelectOption(label=name,value=key) for key,name in options])
+    async def callback(self,i):
+        if i.guild_id!=GUILD: return await deny(i,'These roles belong to the main Project 37 Discord.')
+        cfg=self_role_settings(); ids=cfg.get('roles',{}).get(self.group,{})
+        allowed={key for key,_ in SELF_ROLE_GROUPS[self.group][2]}
+        if not set(self.values)<=allowed: return await deny(i,'Invalid role selection.')
+        if not ids or any(key not in ids for key in allowed): return await deny(i,'Ask an administrator to run /setup_self_roles first.')
+        await i.response.defer(ephemeral=True)
+        async with LOCKS.setdefault(('selfroles',i.guild_id,i.user.id,self.group),asyncio.Lock()):
+            roles={key:i.guild.get_role(int(ids[key])) for key in allowed}
+            chosen=set(self.values)
+            member=await i.guild.fetch_member(i.user.id)
+            add=[r for key,r in roles.items() if key in chosen and r and r not in member.roles]
+            remove=[r for key,r in roles.items() if key not in chosen and r and r in member.roles]
+            if any(not roles[key] for key in chosen): return await deny(i,'A selected role was deleted. Ask staff to rerun /setup_self_roles.')
+            protected=protected_self_role_ids()
+            # Check both additions and removals; no privileged role can be managed here.
+            if any(r.id in protected or r.permissions.value or r.managed or r.is_default() for r in add+remove):
+                return await deny(i,'A configured role now has protected permissions. Ask management to check the self-role setup.')
+            if not i.guild.me.guild_permissions.manage_roles or any(r>=i.guild.me.top_role for r in add+remove):
+                return await deny(i,'The bot needs Manage Roles and must be above the self roles.')
+            if add: await member.add_roles(*add,reason='Project 37 self-role selection')
+            if remove: await member.remove_roles(*remove,reason='Project 37 self-role selection')
+            names=[name for key,name in SELF_ROLE_GROUPS[self.group][2] if key in chosen]
+            await i.followup.send('✅ '+SELF_ROLE_GROUPS[self.group][0]+': '+(', '.join(names) if names else 'cleared')+'\nYour selections replace your previous choices in this category. Other categories are unchanged.',ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
+
+class CommunityRoleView(discord.ui.View):
+    def __init__(self,groups):
+        super().__init__(timeout=None)
+        for group in groups: self.add_item(CommunityRoleSelect(group))
+    async def on_error(self,i,error,item):
+        logging.error('Self-role update failed',exc_info=(type(error),error,error.__traceback__))
+        await deny(i,'Could not finish updating roles. Check your current roles and ask staff to check the bot permissions.')
+
+@bot.tree.command(name='setup_self_roles',description='Create and post Project 37 creator, relationship, age and fun self-role menus')
+@app_commands.default_permissions(administrator=True)
+async def setup_self_roles(i:discord.Interaction,channel:discord.TextChannel=None):
+    if i.guild_id!=GUILD: return await deny(i,'Run this in the main Project 37 Discord.')
+    if not i.user.guild_permissions.administrator: return await deny(i,'Administrator permission is required.')
+    if not i.guild.me.guild_permissions.manage_roles: return await deny(i,'Give the bot Manage Roles first.')
+    cfg=self_role_settings()
+    target=channel or i.guild.get_channel(cfg.get('channel',0)) or i.channel
+    if not isinstance(target,discord.TextChannel): return await deny(i,'Choose a text channel for the self-role panels.')
+    p=target.permissions_for(i.guild.me)
+    if not (p.view_channel and p.send_messages and p.embed_links and p.read_message_history):
+        return await deny(i,'The bot needs View Channel, Send Messages, Embed Links and Read Message History in that channel.')
+    await i.response.defer(ephemeral=True,thinking=True)
+    async with LOCKS.setdefault('setup',asyncio.Lock()):
+        cfg=self_role_settings(); cfg.setdefault('roles',{}); protected=protected_self_role_ids(); resolved={}
+        for group,(_,_,options) in SELF_ROLE_GROUPS.items():
+            for key,name in options:
+                saved=cfg['roles'].get(group,{}).get(key,0)
+                r=i.guild.get_role(int(saved))
+                if not r:
+                    matches=[r for r in i.guild.roles if not r.managed and community_role_name(r.name)==community_role_name(name)]
+                    if len(matches)>1: return await deny(i,f'Multiple roles match {name}. Rename duplicates before retrying.')
+                    r=matches[0] if matches else None
+                if r and (r.id in protected or r.permissions.value or r.managed or r.is_default()):
+                    return await deny(i,f'{name} has existing access/permissions or is a protected role. Rename it or use a separate identity role before setup.')
+                if r and r>=i.guild.me.top_role: return await deny(i,f'Move the bot role above {r.name}, then retry.')
+                resolved[(group,key)]=r
+        colors={'creators':0x9B59B6,'relationship':0xE84393,'age':0xD4AF37,'adult':0xC0392B,'funny':0xF39C12,'personality':0x1ABC9C}
+        for group,(_,_,options) in SELF_ROLE_GROUPS.items():
+            for key,name in options:
+                r=resolved[(group,key)]
+                if r is None: r=await i.guild.create_role(name=name,color=discord.Color(colors[group]),permissions=discord.Permissions.none(),mentionable=False,reason=f'Community self roles requested by {i.user.id}')
+                cfg['roles'].setdefault(group,{})[key]=r.id; save_self_role_settings(cfg)
+        cfg['channel']=target.id; cfg.setdefault('panels',{}); save_self_role_settings(cfg)
+        for panel_key,groups,title,text in [
+            ('identity',['creators','relationship','age'],'✨ Make Yourself at Home','Choose your creator roles, relationship status, and age group. Pick one status and one age group; choose multiple creator roles. Age labels are self-reported, not age verification. Community Streamer does not grant approved creator access.'),
+            ('vibes',['adult','funny','personality'],'😈 What’s Your Vibe?','Pick as many fun and personality roles as you like. Adult RP vibe labels are optional and intended for adult members. They do not grant channel access.\n\nTo change roles, select your full desired set in that category. Clear the selection to remove them.')]:
+            msg=None
+            if cfg['panels'].get(panel_key):
+                try: msg=await target.fetch_message(cfg['panels'][panel_key])
+                except discord.NotFound: pass
+            if not msg:
+                async for candidate in target.history(limit=200):
+                    if candidate.author.id==bot.user.id and any(getattr(c,'custom_id','')=='p37:selfroles:'+groups[0] for row in candidate.components for c in getattr(row,'children',[])):
+                        msg=candidate;break
+            e=embed(title,text);view=CommunityRoleView(groups)
+            if msg and msg.author.id==bot.user.id: await msg.edit(embed=e,view=view)
+            else: msg=await target.send(embed=e,view=view)
+            cfg['panels'][panel_key]=msg.id;save_self_role_settings(cfg)
+        await i.followup.send(f'✅ Self-role panels ready in {target.mention}. No notification, staff, WL, family/gang membership, or approved creator roles were added to the menus.',ephemeral=True)
 
 # Block commands outside their intended server, including any stale guild commands.
 async def server_scope_check(i):
