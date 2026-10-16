@@ -1130,6 +1130,55 @@ async def ems_patient_record(i:discord.Interaction,department:str,character_name
         EMS_DB.execute('INSERT INTO patient_threads VALUES(?,?,?,?) ON CONFLICT(guild,department,patient) DO UPDATE SET thread=excluded.thread',(EMS_GUILD,department,patient_key,thread.id)); EMS_DB.commit()
         await i.followup.send(f'Visit saved in {thread.mention}. Use the same character name and department for future visits.',ephemeral=True)
 
+# Main-city identity roles. Custom Discord emoji markup is for messages, not role names.
+COMMUNITY_ROLES = [
+    ('community_erp_demon','😈 ERP DEMON',0xC0392B,'<:ERP2:1409962797483167895>'),
+    ('community_homewrecker','💔 HOMEWRECKER',0xE84393,'<:lovestory:1493771825631461517>'),
+    ('community_single','💚 SINGLE',0x2ECC71,'<:p7gpassggamores:1493771347455774922>'),
+    ('community_taken','💍 TAKEN',0xE91E63,'<a:Pink_check:1493770801042821290>'),
+    ('community_young_family','💥 Young Family',0xF39C12,'💥'),
+    ('community_bta_family','🩸 BTA Family',0x9B59B6,'<a:32371vibes:1519615213505216632>'),
+    ('community_yrn_gang','🔫 YRN gang',0x34495E,'<a:75390gun:1475932186573017129>'),
+]
+
+def community_role_name(value):
+    return ''.join(c for c in value.casefold() if c.isalnum())
+
+@bot.tree.command(name='add_community_roles',description='Add Project 37 relationship, family and gang identity roles')
+@app_commands.default_permissions(administrator=True)
+async def add_community_roles(i:discord.Interaction):
+    if i.guild_id!=GUILD: return await deny(i,'Run this in the main Project 37 Discord.')
+    if not i.user.guild_permissions.administrator: return await deny(i,'Administrator permission is required.')
+    if not i.guild.me.guild_permissions.manage_roles: return await deny(i,'Give the bot Manage Roles first.')
+    await i.response.defer(ephemeral=True,thinking=True)
+    async with LOCKS.setdefault('setup',asyncio.Lock()):
+        resolved={}
+        # Resolve the whole batch first so duplicate names cannot select the wrong role.
+        for key,name,color,emoji in COMMUNITY_ROLES:
+            r=i.guild.get_role(int(CFG.get('roles',{}).get(key,0)))
+            if not r:
+                matches=[r for r in i.guild.roles if not r.managed and community_role_name(r.name)==community_role_name(name)]
+                if len(matches)>1: return await deny(i,f'Multiple roles match {name}. Rename the extra roles, then retry.')
+                r=matches[0] if matches else None
+            if r and (r.managed or r.is_default()): return await deny(i,f'{name} must be a normal member role.')
+            if r and r>=i.guild.me.top_role: return await deny(i,f'Move the bot role above {r.name} so it can add the emoji.')
+            resolved[key]=r
+        lines=[]
+        for key,name,color,emoji in COMMUNITY_ROLES:
+            r=resolved[key]
+            created=r is None
+            if created:
+                r=await i.guild.create_role(name=name,color=discord.Color(color),permissions=discord.Permissions.none(),mentionable=False,reason=f'Project 37 identity roles requested by {i.user.id}')
+            elif r.name!=name:
+                r=await r.edit(name=name,reason=f'Add identity-role emoji requested by {i.user.id}')
+            # Reusing a role preserves its permissions and current members.
+            CFG.setdefault('roles',{})[key]=r.id
+            CFG.setdefault('role_names',{})[key]=r.name
+            tmp=ROOT/'config.json.tmp'
+            tmp.write_text(json.dumps(CFG,indent=2,ensure_ascii=False),encoding='utf-8'); tmp.replace(ROOT/'config.json')
+            lines.append(f'{emoji} {r.mention} — '+('created' if created else 'already exists'))
+        await i.followup.send('✅ Project 37 identity roles ready:\n'+'\n'.join(lines)+'\n\nAssign these roles manually. Newly created roles have no extra permissions. Custom emojis display in this message; Discord role names cannot render custom emoji markup.',ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
+
 # Block commands outside their intended server, including any stale guild commands.
 async def server_scope_check(i):
     name=i.command.name if i.command else ''
